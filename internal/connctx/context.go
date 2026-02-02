@@ -1,9 +1,11 @@
+// internal/connctx/context.go
 package connctx
 
 import (
 	"context"
-	"net"
 	"sync/atomic"
+
+	enio "github.com/tamzrod/enzo/internal/io"
 )
 
 // Mode defines how this connection is processed.
@@ -22,9 +24,9 @@ type ConnectionContext struct {
 	ID   uint64
 	Mode Mode
 
-	// Network endpoints
-	Source      net.Conn
-	Destination net.Conn
+	// Buffered network endpoints
+	Source      *enio.BufferedConn
+	Destination *enio.BufferedConn
 
 	// Epoch state (monotonically increasing)
 	Epoch uint32
@@ -35,3 +37,7 @@ type ConnectionContext struct {
 	// Lifecycle control
 	Ctx    context.Context
 	Cancel context.CancelFunc
+
+	// Internal flags
+	Closed atomic.Bool
+}

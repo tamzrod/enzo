@@ -8,7 +8,9 @@ import (
 	"sync/atomic"
 
 	"github.com/tamzrod/enzo/internal/connctx"
+	enio "github.com/tamzrod/enzo/internal/io"
 	"github.com/tamzrod/enzo/internal/protocol"
+	"github.com/tamzrod/enzo/internal/state"
 )
 
 // Listener owns the TCP accept loop.
@@ -20,7 +22,6 @@ type Listener struct {
 }
 
 // Run starts the blocking accept loop.
-// It exits only on fatal listener error or context cancellation.
 func (l *Listener) Run(ctx context.Context) error {
 	ln, err := net.Listen("tcp", l.ListenAddr)
 	if err != nil {
@@ -37,30 +38,28 @@ func (l *Listener) Run(ctx context.Context) error {
 		default:
 		}
 
-		src, err := ln.Accept()
+		srcConn, err := ln.Accept()
 		if err != nil {
 			log.Printf("accept error: %v", err)
 			continue
 		}
 
-		go l.handleConn(ctx, src)
+		go l.handleConn(ctx, srcConn)
 	}
 }
 
-func (l *Listener) handleConn(parent context.Context, src net.Conn) {
-	defer src.Close()
+func (l *Listener) handleConn(parent context.Context, rawSrc net.Conn) {
+	defer rawSrc.Close()
 
-	// Dial destination immediately
-	dst, err := net.Dial("tcp", l.DestAddr)
+	rawDst, err := net.Dial("tcp", l.DestAddr)
 	if err != nil {
 		log.Printf("dial destination failed: %v", err)
 		return
 	}
 
-	// Destination lifecycle is bound to context
-	// Do not defer dst.Close() here
+	src := enio.NewBufferedConn(rawSrc)
+	dst := enio.NewBufferedConn(rawDst)
 
-	// Peek first byte to classify stream
 	mode, err := classifyMode(src)
 	if err != nil {
 		log.Printf("stream classify failed: %v", err)
@@ -75,7 +74,7 @@ func (l *Listener) handleConn(parent context.Context, src net.Conn) {
 		Mode:        mode,
 		Source:      src,
 		Destination: dst,
-		Epoch:       0,
+		Epoch:       protocol.InitialEpoch,
 		Dictionary:  nil,
 		Ctx:         ctx,
 		Cancel:      cancel,
@@ -83,25 +82,27 @@ func (l *Listener) handleConn(parent context.Context, src net.Conn) {
 
 	log.Printf("conn %d accepted (%s)", cc.ID, modeString(cc.Mode))
 
-	// HANDOFF POINT
-	// State machine will take ownership here.
-	<-ctx.Done()
+	// HANDOFF: state machine owns lifecycle from here
+	state.Run(cc)
 
 	dst.Close()
 }
 
-func classifyMode(c net.Conn) (connctx.Mode, error) {
-	buf := make([]byte, 1)
-
-	n, err := c.Read(buf)
+func classifyMode(c *enio.BufferedConn) (connctx.Mode, error) {
+	b, err := c.PeekByte()
 	if err != nil {
 		return 0, err
 	}
-	if n != 1 {
-		return 0, net.ErrClosed
-	}
 
-	// NOTE:
-	// This read consumes the byte.
-	// A buffered wrapper will re-inject this byte in io/framer.go.
-	if buf[0] == protocol.MagicByte {
+	if b == protocol.MagicByte {
+		return connctx.ModeDecode, nil
+	}
+	return connctx.ModeEncode, nil
+}
+
+func modeString(m connctx.Mode) string {
+	if m == connctx.ModeDecode {
+		return "decode"
+	}
+	return "encode"
+}

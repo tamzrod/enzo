@@ -8,158 +8,276 @@
 
 ## 1. Purpose and Scope
 
-ENZO is a **transparent, inline compression layer** designed to sit between two TCP endpoints.
+ENZO is a **transparent, inline stream transformation layer** designed to sit between two TCP endpoints.
 
-It reduces bandwidth by exploiting **structural repetition** in streaming protocols through **end‑to‑end agreement**, not through traditional entropy coding.
+Its primary goal is to **reduce bandwidth opportunistically** by exploiting **structural repetition** in streaming data through **end‑to‑end agreement**, not through entropy coding.
 
 ENZO is:
-- protocol‑agnostic
-- connection‑scoped
-- stateful but reset‑safe
-- invisible to upstream and downstream applications
 
-It is **not** a file compressor, message broker, or application protocol.
+* protocol‑agnostic
+* connection‑scoped
+* stateful but reset‑safe
+* invisible to upstream and downstream applications
+
+ENZO is **not**:
+
+* a file compressor
+* a message broker
+* an application‑level protocol
+* a replacement for TLS or transport security
 
 ---
 
-## 2. Core Principles
+## 2. Core Architectural Principles
+
+These principles are **authoritative**. Any implementation or extension must preserve them.
 
 ### 2.1 Agreement, Not Guessing
 
-Compression is achieved by both ends maintaining **shared agreement state** (dictionary + templates).
+Compression is achieved through **shared agreement state** between sender and receiver:
 
-The sender *defines meaning*.
-The receiver *applies meaning*.
+* dictionaries
+* templates
+* epochs
 
-The receiver never guesses.
+The sender defines meaning.
+The receiver applies meaning.
+
+The receiver **never guesses**.
 
 ---
 
-### 2.2 TCP‑in / TCP‑out
+### 2.2 Magic Is the Only Mandatory Header
+
+A single **magic byte / marker** is the only unconditional signal required on the wire.
+
+Magic answers the only always‑necessary question:
+
+> *“What am I looking at?”*
+
+Once magic is observed and state is established:
+
+* protocol version is known
+* mode is known
+* interpretation rules are known
+
+All other metadata is **conditional** and **state‑dependent**.
+
+---
+
+### 2.3 Silence Is Meaningful
+
+The **absence of control output is itself meaningful**.
+
+* When state does not change, no control information is required
+* Repeating headers when nothing has changed is considered noise
+* Stability is communicated by **silence**, not repetition
+
+Control frames exist **only** to signal state transitions.
+
+---
+
+### 2.4 Headers Represent Control, Not Payload
+
+Headers are **control traffic**, not data.
+
+They exist only to signal:
+
+* epoch resets
+* dictionary or template definition
+* interpretation changes
+
+Payload data must **not continuously pay a header tax** when state is stable.
+
+---
+
+### 2.5 Opportunistic Compression
+
+Compression is an **optimization**, never a requirement.
+
+ENZO must:
+
+* observe and learn continuously
+* compress only when profitable
+* transparently pass raw data when compression provides no gain
+
+If compression cannot prove benefit, ENZO must **get out of the way**.
+
+---
+
+### 2.6 Raw Passthrough Is a Valid Steady State
+
+Passing raw data unchanged is:
+
+* correct behavior
+* a valid long‑term operating mode
+* not a failure condition
+
+ENZO must be safe to deploy inline with **zero regret**.
+
+---
+
+### 2.7 State Over Repetition
+
+Meaning is carried by **shared state**, not repeated metadata.
+
+Once state is synchronized:
+
+* data alone may be sufficient
+* headers are omitted unless state changes
+
+Epoch reset is the only hard resynchronization mechanism.
+
+---
+
+## 3. TCP‑In / TCP‑Out Model
 
 ENZO relies entirely on TCP for:
-- ordering
-- reliability
-- backpressure
+
+* ordering
+* reliability
+* backpressure
 
 ENZO does **not** re‑implement transport semantics.
 
+It behaves as a pure stream transformer:
+
+```
+TCP → ENZO → TCP
+```
+
 ---
 
-### 2.3 One Connection = One Context
+## 4. One Connection = One Context
 
 Each TCP connection owns exactly one:
-- dictionary
-- epoch timeline
-- compression context
+
+* dictionary
+* epoch timeline
+* compression context
 
 Contexts are **never shared** across connections.
 
----
-
-## 3. Operational Model
-
-ENZO runs as a **single service** that:
-- listens on one TCP port
-- forwards traffic to one configured destination
-
-Multiple simultaneous connections are allowed.
-Each connection is fully isolated.
-
-Routing decisions are made **per connection**, not per process.
+All state is scoped to the lifetime of the TCP connection.
 
 ---
 
-## 4. Stream Classification (Encode vs Decode)
+## 5. Operational Model
+
+ENZO runs as a single service that:
+
+* listens on one TCP port
+* forwards traffic to one configured destination
+
+Multiple simultaneous connections are supported.
+Each connection is isolated and independent.
+
+Routing decisions are made **per connection**, never globally.
+
+---
+
+## 6. Stream Classification (Encode vs Decode)
 
 ENZO auto‑selects behavior by inspecting the incoming stream.
 
-### Rule
+### Classification Rule
 
-- **Magic byte present** → stream is compressed → **decode**
-- **Magic byte absent** → stream is raw → **encode**
+* **Magic byte present** → stream is ENZO‑encoded → **decode mode**
+* **Magic byte absent** → stream is raw → **encode mode**
 
 This decision is:
-- deterministic
-- content‑driven
-- configuration‑free
 
-Ports never imply meaning.
+* deterministic
+* content‑driven
+* configuration‑free
+
+Ports and configuration do not imply meaning.
 
 ---
 
-## 5. Epochs
+## 7. Epoch Model
 
-### 5.1 Definition
+### 7.1 Definition
 
-An **epoch** is a time window during which both sides share the same dictionary state.
+An **epoch** is a bounded period during which both sides share identical agreement state.
 
 Dictionary IDs and template IDs are valid **only within their epoch**.
 
 ---
 
-### 5.2 Reset Semantics
+### 7.2 Reset Semantics
 
-If either side loses state or detects protocol violation:
+If either side:
 
-- a new epoch begins
-- both sides discard dictionary state
-- compression restarts naturally
+* loses state
+* restarts
+* detects protocol violation
 
-No dictionary replay is performed.
+Then:
+
+* a new epoch begins
+* both sides discard dictionary state
+* compression restarts naturally
 
 The dictionary is treated as a **cache**, not durable state.
+No replay is performed.
 
 ---
 
-## 6. Dictionary Model
+## 8. Dictionary Model
 
-### 6.1 Nature
+### 8.1 Nature
 
 The dictionary is:
-- bounded
-- disposable
-- per‑connection
+
+* bounded
+* disposable
+* per‑connection
 
 Losing the dictionary is acceptable and safe.
 
 ---
 
-### 6.2 Lifespan
+### 8.2 Lifespan
 
 Dictionary entries:
-- live within an epoch
-- age only when unused
-- are refreshed on use
+
+* live within an epoch
+* age only when unused
+* are refreshed on use
 
 When bounds are exceeded, a new epoch is started.
 
 ---
 
-## 7. Units of Compression
+## 9. Units of Compression
 
-### 7.1 Templates
+### 9.1 Templates
 
 Templates capture **structural repetition**:
-- constant byte segments
-- variable lanes
+
+* constant byte segments
+* variable lanes
 
 Templates are defined once and referenced many times.
 
 This works especially well for:
-- line protocol
-- telemetry
-- logs
-- industrial protocols
+
+* telemetry
+* line‑oriented protocols
+* logs
+* industrial and control traffic
 
 ---
 
-### 7.2 RAW Fallback
+### 9.2 RAW Fallback
 
 When data is:
-- too small
-- too large
-- unsafe to model
+
+* too small
+* too large
+* insufficiently repetitive
+* unsafe to model
 
 ENZO emits RAW bytes unchanged.
 
@@ -167,90 +285,86 @@ Correctness always wins over compression.
 
 ---
 
-## 8. Wire Protocol
+## 10. Wire Protocol Philosophy
 
-ENZO uses an **explicit, framed, event‑based wire protocol**.
+ENZO uses an **event‑based wire protocol**.
 
-The protocol defines:
-- frame headers
-- event types
-- ordering rules
-- reset behavior
+Key properties:
 
-The protocol is **hard‑defined**, not negotiated.
+* frames represent **control events**, not steady‑state data
+* headers are emitted **only on state transitions**
+* absence of frames implies unchanged state
 
-See `PROTOCOL.md` for details.
+The protocol is hard‑defined, not negotiated.
+
+See `PROTOCOL.md` for exact wire details.
 
 ---
 
-## 9. Failure Model
+## 11. Failure Model
 
-### 9.1 Receiver Restart
+### 11.1 Receiver Restart
 
 If the receiver restarts:
-- state is lost
-- a new epoch begins
-- both sides realign automatically
 
-Traffic continues safely.
+* TCP connection drops
+* state is lost
+* a new epoch begins
+
+Traffic resumes safely on reconnect.
 
 ---
 
-### 9.2 Invalid Streams
+### 11.2 Invalid Streams
 
 On protocol violation:
-- decoding stops
-- epoch is reset or connection is closed
+
+* decoding stops
+* epoch is reset or connection is closed
 
 Silent corruption is never allowed.
 
 ---
 
-## 10. Configuration Philosophy
+## 12. Configuration Philosophy
 
-### 10.1 Separation of Concerns
+### 12.1 Separation of Concerns
 
-ENZO distinguishes between:
+ENZO separates:
 
-- **Protocol invariants** (meaning)
-- **Operational policy** (deployment limits)
+* **protocol invariants** (meaning)
+* **operational policy** (limits and deployment)
 
 ---
 
-### 10.2 Protocol Invariants (Not Configurable)
+### 12.2 Protocol Invariants (Not Configurable)
 
-The following are fixed by architecture and never configurable:
+The following are fixed by architecture:
 
-- magic byte semantics
-- encode/decode routing logic
-- wire format
-- definition‑before‑reference rule
-- epoch semantics
-- dictionary agreement model
-- strict decoding behavior
+* magic semantics
+* encode/decode routing
+* epoch behavior
+* dictionary agreement model
+* strict decoding rules
 
 Any attempt to configure these is ignored or rejected.
 
 ---
 
-### 10.3 Operational Defaults (Overridable if Present)
+### 12.3 Operational Defaults (Overridable)
 
-The system has **sane defaults** for operational limits.
+Operational limits may be overridden only when explicitly provided:
 
-Configuration may override them **only when explicitly provided**:
-
-- connection limits
-- dictionary size caps
-- idle timeouts
-- logging verbosity
+* connection limits
+* dictionary caps
+* idle timeouts
+* logging verbosity
 
 If omitted, defaults apply unchanged.
 
 ---
 
-## 11. Configuration Surface (v1)
-
-The minimal valid configuration is:
+## 13. Minimal Configuration Surface (v1)
 
 ```yaml
 listen:
@@ -262,40 +376,41 @@ destination:
   port: 8086
 ```
 
-All other behavior derives from architecture defaults.
+All other behavior derives from architectural defaults.
 
 ---
 
-## 12. Security Position
+## 14. Security Position
 
 ENZO is **not a security protocol**.
 
-- assumes trusted or externally secured transport
-- may leak structural information
-- does not replace TLS or VPNs
+* assumes trusted or externally secured transport
+* may leak structural information
+* does not replace TLS or VPNs
 
 ---
 
-## 13. Future: Dictionary Encryption
+## 15. Future: Dictionary Encryption
 
 Future versions may support:
-- encryption of dictionary definitions only
-- epoch‑scoped keys
-- external key management
+
+* encryption of dictionary definitions only
+* epoch‑scoped keys
+* external key management
 
 Encryption is optional and orthogonal to compression logic.
 
 ---
 
-## 14. Summary
+## 16. Summary
 
 ENZO works because:
 
-- agreement replaces repetition
-- TCP guarantees correctness
-- dictionaries are disposable
-- epochs make recovery trivial
-- configuration never alters meaning
+* agreement replaces repetition
+* magic anchors interpretation
+* silence communicates stability
+* dictionaries are disposable
+* epochs make recovery trivial
+* compression is optional and honest
 
-The system favors **correctness, simplicity, and operability** over theoretical optimality.
-
+The system favors **correctness, minimal overhead, and operability** over theoretical optimality.

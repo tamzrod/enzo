@@ -3,13 +3,16 @@ package io
 
 import (
 	"bufio"
+	"bytes"
+	"errors"
 	"net"
+	"time"
 )
 
-// BufferedConn wraps a net.Conn and allows
-// peeking and re-reading bytes safely.
+// BufferedConn wraps net.Conn and adds buffering + record awareness
+// while still fully implementing net.Conn.
 type BufferedConn struct {
-	Conn   net.Conn
+	net.Conn
 	Reader *bufio.Reader
 	Writer *bufio.Writer
 }
@@ -32,12 +35,21 @@ func (b *BufferedConn) PeekByte() (byte, error) {
 	return buf[0], nil
 }
 
-// Read implements io.Reader using the buffered reader.
+// ReadLine reads a full line ending in '\n'.
+func (b *BufferedConn) ReadLine() ([]byte, error) {
+	line, err := b.Reader.ReadBytes('\n')
+	if err != nil {
+		return nil, err
+	}
+	return line, nil
+}
+
+// Read implements io.Reader.
 func (b *BufferedConn) Read(p []byte) (int, error) {
 	return b.Reader.Read(p)
 }
 
-// Write implements io.Writer using the buffered writer.
+// Write implements io.Writer and flushes immediately.
 func (b *BufferedConn) Write(p []byte) (int, error) {
 	n, err := b.Writer.Write(p)
 	if err != nil {
@@ -46,7 +58,36 @@ func (b *BufferedConn) Write(p []byte) (int, error) {
 	return n, b.Writer.Flush()
 }
 
-// Close closes the underlying connection.
-func (b *BufferedConn) Close() error {
-	return b.Conn.Close()
+// WriteLine writes a full logical record.
+func (b *BufferedConn) WriteLine(p []byte) error {
+	if len(p) == 0 {
+		return nil
+	}
+	if !bytes.HasSuffix(p, []byte{'\n'}) {
+		return errors.New("framer: line does not end with newline")
+	}
+	_, err := b.Write(p)
+	return err
+}
+
+// ---- net.Conn interface forwarding ----
+
+func (b *BufferedConn) LocalAddr() net.Addr {
+	return b.Conn.LocalAddr()
+}
+
+func (b *BufferedConn) RemoteAddr() net.Addr {
+	return b.Conn.RemoteAddr()
+}
+
+func (b *BufferedConn) SetDeadline(t time.Time) error {
+	return b.Conn.SetDeadline(t)
+}
+
+func (b *BufferedConn) SetReadDeadline(t time.Time) error {
+	return b.Conn.SetReadDeadline(t)
+}
+
+func (b *BufferedConn) SetWriteDeadline(t time.Time) error {
+	return b.Conn.SetWriteDeadline(t)
 }

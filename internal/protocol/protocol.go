@@ -20,7 +20,7 @@ const (
 type FrameType uint8
 
 const (
-	FrameEpochReset FrameType = 0x01
+	FrameEpochReset     FrameType = 0x01
 	FrameTemplateDefine FrameType = 0x02
 	FrameTemplateRef    FrameType = 0x03
 	FrameRawData        FrameType = 0x04
@@ -45,16 +45,33 @@ const (
 
 // Epoch rules
 const (
-	// Epoch starts at zero and increments monotonically.
 	InitialEpoch uint32 = 0
-)
-
-// Dictionary / template ID sizing (wire-level)
-const (
-	TemplateIDSizeBytes = 2 // uint16
 )
 
 // Safety bounds (protocol-level, not config)
 const (
 	MaxFramePayloadBytes = 16 * 1024 * 1024 // 16 MB hard cap
+)
+
+// Template encoding (v1)
+//
+// TEMPLATE_DEFINE payload:
+//   u16 templateID
+//   u8  segmentCount
+//   repeating segments:
+//     u8  segType
+//     u16 segLen
+//     segBytes (only if segType == CONST_BYTES)
+//
+// TEMPLATE_REF payload:
+//   u16 templateID
+//   u8  laneCount
+//   repeating lanes:
+//     u16 laneLen
+//     laneBytes
+type SegmentType uint8
+
+const (
+	SegConstBytes SegmentType = 0x01
+	SegVarLane    SegmentType = 0x02
 )

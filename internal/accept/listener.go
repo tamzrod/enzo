@@ -2,107 +2,56 @@
 package accept
 
 import (
-	"context"
+	stdio "io"
+	"errors"
 	"log"
 	"net"
-	"sync/atomic"
 
 	"github.com/tamzrod/enzo/internal/connctx"
 	enio "github.com/tamzrod/enzo/internal/io"
-	"github.com/tamzrod/enzo/internal/protocol"
-	"github.com/tamzrod/enzo/internal/state"
 )
 
-// Listener owns the TCP accept loop.
-type Listener struct {
-	ListenAddr string
-	DestAddr   string
-
-	nextID atomic.Uint64
-}
-
-// Run starts the blocking accept loop.
-func (l *Listener) Run(ctx context.Context) error {
-	ln, err := net.Listen("tcp", l.ListenAddr)
-	if err != nil {
-		return err
-	}
-	defer ln.Close()
-
-	log.Printf("enzo listening on %s -> %s", l.ListenAddr, l.DestAddr)
+// ListenAndServe accepts incoming TCP connections and classifies them.
+func ListenAndServe(
+	ln net.Listener,
+	ctxFactory func(*enio.BufferedConn, connctx.Mode) *connctx.ConnectionContext,
+	run func(*connctx.ConnectionContext),
+) error {
 
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		srcConn, err := ln.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("accept error: %v", err)
-			continue
+			return err
 		}
-
-		go l.handleConn(ctx, srcConn)
+		go handleConn(conn, ctxFactory, run)
 	}
 }
 
-func (l *Listener) handleConn(parent context.Context, rawSrc net.Conn) {
-	defer rawSrc.Close()
+func handleConn(
+	c net.Conn,
+	ctxFactory func(*enio.BufferedConn, connctx.Mode) *connctx.ConnectionContext,
+	run func(*connctx.ConnectionContext),
+) {
+	defer c.Close()
 
-	rawDst, err := net.Dial("tcp", l.DestAddr)
+	bc := enio.NewBufferedConn(c)
+
+	b, err := bc.PeekByte()
 	if err != nil {
-		log.Printf("dial destination failed: %v", err)
-		return
-	}
-
-	src := enio.NewBufferedConn(rawSrc)
-	dst := enio.NewBufferedConn(rawDst)
-
-	mode, err := classifyMode(src)
-	if err != nil {
+		if errors.Is(err, stdio.EOF) || errors.Is(err, net.ErrClosed) {
+			return // normal empty connection
+		}
 		log.Printf("stream classify failed: %v", err)
-		dst.Close()
 		return
 	}
 
-	ctx, cancel := context.WithCancel(parent)
-
-	cc := &connctx.ConnectionContext{
-		ID:          l.nextID.Add(1),
-		Mode:        mode,
-		Source:      src,
-		Destination: dst,
-		Epoch:       protocol.InitialEpoch,
-		Dictionary:  nil,
-		Ctx:         ctx,
-		Cancel:      cancel,
-	}
-
-	log.Printf("conn %d accepted (%s)", cc.ID, modeString(cc.Mode))
-
-	// HANDOFF: state machine owns lifecycle from here
-	state.Run(cc)
-
-	dst.Close()
+	mode := classify(b)
+	cc := ctxFactory(bc, mode)
+	run(cc)
 }
 
-func classifyMode(c *enio.BufferedConn) (connctx.Mode, error) {
-	b, err := c.PeekByte()
-	if err != nil {
-		return 0, err
-	}
-
-	if b == protocol.MagicByte {
-		return connctx.ModeDecode, nil
-	}
-	return connctx.ModeEncode, nil
-}
-
-func modeString(m connctx.Mode) string {
-	if m == connctx.ModeDecode {
-		return "decode"
-	}
-	return "encode"
+func classify(b byte) connctx.Mode {
+	// ENZO-framed streams start with protocol magic (handled later)
+	// Default to encode for now
+	return connctx.ModeEncode
 }

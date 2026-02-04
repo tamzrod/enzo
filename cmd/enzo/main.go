@@ -36,7 +36,7 @@ func main() {
 
 	log.Printf("enzo listening on %s -> %s", listenAddr, destAddr)
 
-	ctxFactory := func(src *enio.BufferedConn, mode connctx.Mode) *connctx.ConnectionContext {
+	ctxFactory := func(src *enio.PayloadConn, mode connctx.Mode) *connctx.ConnectionContext {
 		dstConn, err := net.Dial("tcp", destAddr)
 		if err != nil {
 			log.Printf("destination dial failed: %v", err)
@@ -44,7 +44,7 @@ func main() {
 			return nil
 		}
 
-		dst := enio.NewBufferedConn(dstConn)
+		dst := enio.NewPayloadConn(dstConn)
 
 		ctx, cancel := context.WithCancel(context.Background())
 
@@ -60,8 +60,7 @@ func main() {
 		}
 	}
 
-	err = accept.ListenAndServe(ln, ctxFactory, state.Run)
-	if err != nil {
+	if err := accept.ListenAndServe(ln, ctxFactory, state.Run); err != nil {
 		log.Fatalf("accept loop failed: %v", err)
 	}
 }

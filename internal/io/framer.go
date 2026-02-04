@@ -3,91 +3,129 @@ package io
 
 import (
 	"bufio"
-	"bytes"
+	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"time"
 )
 
-// BufferedConn wraps net.Conn and adds buffering + record awareness
-// while still fully implementing net.Conn.
-type BufferedConn struct {
-	net.Conn
-	Reader *bufio.Reader
-	Writer *bufio.Writer
+const (
+	// MaxPayloadSize is a hard safety limit to prevent OOM.
+	// This is an operational limit, not a protocol semantic.
+	MaxPayloadSize = 16 * 1024 * 1024 // 16 MiB
+)
+
+// PayloadConn is a minimal wrapper over net.Conn that supports:
+//
+// - PeekByte() for stream classification (magic detection)
+// - ReadPacket()/WritePacket() for explicit payload framing
+//
+// It does NOT:
+// - split by delimiters
+// - parse text
+// - infer message boundaries
+type PayloadConn struct {
+	conn net.Conn
+	r    *bufio.Reader
 }
 
-// NewBufferedConn creates a buffered wrapper over net.Conn.
-func NewBufferedConn(c net.Conn) *BufferedConn {
-	return &BufferedConn{
-		Conn:   c,
-		Reader: bufio.NewReader(c),
-		Writer: bufio.NewWriter(c),
+// NewPayloadConn wraps a net.Conn without altering semantics.
+func NewPayloadConn(c net.Conn) *PayloadConn {
+	return &PayloadConn{
+		conn: c,
+		r:    bufio.NewReader(c),
 	}
 }
 
 // PeekByte returns the next byte without consuming it.
-func (b *BufferedConn) PeekByte() (byte, error) {
-	buf, err := b.Reader.Peek(1)
+// Used only for stream classification.
+func (p *PayloadConn) PeekByte() (byte, error) {
+	b, err := p.r.Peek(1)
 	if err != nil {
 		return 0, err
 	}
-	return buf[0], nil
+	return b[0], nil
 }
 
-// ReadLine reads a full line ending in '\n'.
-func (b *BufferedConn) ReadLine() ([]byte, error) {
-	line, err := b.Reader.ReadBytes('\n')
-	if err != nil {
+// ReadPacket reads exactly one payload packet from the stream,
+// using an explicit uint32 BE length prefix.
+//
+// Producer responsibility: send [len][payload] atomically per dataset.
+func (p *PayloadConn) ReadPacket() ([]byte, error) {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(p.r, lenBuf[:]); err != nil {
 		return nil, err
 	}
-	return line, nil
-}
 
-// Read implements io.Reader.
-func (b *BufferedConn) Read(p []byte) (int, error) {
-	return b.Reader.Read(p)
-}
-
-// Write implements io.Writer and flushes immediately.
-func (b *BufferedConn) Write(p []byte) (int, error) {
-	n, err := b.Writer.Write(p)
-	if err != nil {
-		return n, err
+	n := binary.BigEndian.Uint32(lenBuf[:])
+	if n == 0 {
+		return []byte{}, nil
 	}
-	return n, b.Writer.Flush()
+	if n > MaxPayloadSize {
+		return nil, errors.New("payloadconn: payload exceeds MaxPayloadSize")
+	}
+
+	payload := make([]byte, int(n))
+	if _, err := io.ReadFull(p.r, payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
 }
 
-// WriteLine writes a full logical record.
-func (b *BufferedConn) WriteLine(p []byte) error {
-	if len(p) == 0 {
+// WritePacket writes exactly one payload packet to the stream,
+// using an explicit uint32 BE length prefix.
+func (p *PayloadConn) WritePacket(payload []byte) error {
+	if len(payload) > MaxPayloadSize {
+		return errors.New("payloadconn: payload exceeds MaxPayloadSize")
+	}
+
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(payload)))
+
+	if _, err := p.conn.Write(lenBuf[:]); err != nil {
+		return err
+	}
+	if len(payload) == 0 {
 		return nil
 	}
-	if !bytes.HasSuffix(p, []byte{'\n'}) {
-		return errors.New("framer: line does not end with newline")
-	}
-	_, err := b.Write(p)
+	_, err := p.conn.Write(payload)
 	return err
 }
 
-// ---- net.Conn interface forwarding ----
-
-func (b *BufferedConn) LocalAddr() net.Addr {
-	return b.Conn.LocalAddr()
+// Read reads raw bytes from the connection.
+// Reads flow through the buffered reader so any prior Peek is preserved.
+func (p *PayloadConn) Read(b []byte) (int, error) {
+	return p.r.Read(b)
 }
 
-func (b *BufferedConn) RemoteAddr() net.Addr {
-	return b.Conn.RemoteAddr()
+// Write writes raw bytes to the connection.
+func (p *PayloadConn) Write(b []byte) (int, error) {
+	return p.conn.Write(b)
 }
 
-func (b *BufferedConn) SetDeadline(t time.Time) error {
-	return b.Conn.SetDeadline(t)
+func (p *PayloadConn) Close() error {
+	return p.conn.Close()
 }
 
-func (b *BufferedConn) SetReadDeadline(t time.Time) error {
-	return b.Conn.SetReadDeadline(t)
+// ---- net.Conn forwarding ----
+
+func (p *PayloadConn) LocalAddr() net.Addr {
+	return p.conn.LocalAddr()
 }
 
-func (b *BufferedConn) SetWriteDeadline(t time.Time) error {
-	return b.Conn.SetWriteDeadline(t)
+func (p *PayloadConn) RemoteAddr() net.Addr {
+	return p.conn.RemoteAddr()
+}
+
+func (p *PayloadConn) SetDeadline(t time.Time) error {
+	return p.conn.SetDeadline(t)
+}
+
+func (p *PayloadConn) SetReadDeadline(t time.Time) error {
+	return p.conn.SetReadDeadline(t)
+}
+
+func (p *PayloadConn) SetWriteDeadline(t time.Time) error {
+	return p.conn.SetWriteDeadline(t)
 }

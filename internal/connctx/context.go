@@ -24,9 +24,9 @@ type ConnectionContext struct {
 	ID   uint64
 	Mode Mode
 
-	// Buffered network endpoints
-	Source      *enio.BufferedConn
-	Destination *enio.BufferedConn
+	// Network endpoints (opaque byte transport; no record semantics)
+	Source      *enio.PayloadConn
+	Destination *enio.PayloadConn
 
 	// Epoch state (monotonically increasing)
 	Epoch uint32

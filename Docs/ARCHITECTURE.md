@@ -1,416 +1,187 @@
-# ARCHITECTURE.md
+# ENZO Architecture
 
-## ENZO Compression Engine Architecture
+## Core Principles (LOCKED)
 
-**State‑synchronized, agreement‑based stream transformer (TCP‑in / TCP‑out)**
+### 1. Packet Transformation (Primary Invariant)
+
+**ENZO is a packet transformer.**
+
+> **One payload in → one ENZO frame out.**
+>
+> Any internal re-segmentation (line-based, delimiter-based, heuristic-based) is a **hard violation**.
+
+Compression that breaks packet boundaries does not save bandwidth; it **multiplies overhead** and destroys ROI.
+
+This rule is non-negotiable.
 
 ---
 
-## 1. Purpose and Scope
+### 2. Explicitness (LOCKED)
 
-ENZO is a **transparent, inline stream transformation layer** designed to sit between two TCP endpoints.
+> **If ENZO touches the data, it MUST emit an ENZO frame.**  
+> **Everything ENZO outputs begins with the ENZO magic byte.**
 
-Its primary goal is to **reduce bandwidth opportunistically** by exploiting **structural repetition** in streaming data through **end‑to‑end agreement**, not through entropy coding.
+There is no invisible passthrough.
 
-ENZO is:
+Even when compression is skipped, the decision is made explicit via an ENZO frame.
 
-* protocol‑agnostic
-* connection‑scoped
-* stateful but reset‑safe
-* invisible to upstream and downstream applications
+This guarantees:
+- deterministic behavior
+- safe chaining
+- bounded worst-case loss
+- no re-encoding ambiguity
+
+---
+
+## What ENZO Is
+
+ENZO is a **payload-oriented agreement engine** that sits between systems and transforms packets while preserving exact byte boundaries.
+
+ENZO:
+- operates on **whole payloads**, not records or lines
+- treats payload bytes as **opaque**
+- never invents structure
+- never infers boundaries
+- never parses application protocols
+
+ENZO applies agreement **only within the payload it receives**.
+
+---
+
+## What ENZO Is Not
 
 ENZO is **not**:
+- a line protocol parser
+- a stream parser
+- a record splitter
+- a text-aware compressor
+- a delimiter-driven engine
+- a transparent proxy
 
-* a file compressor
-* a message broker
-* an application‑level protocol
-* a replacement for TLS or transport security
-
----
-
-## 2. Core Architectural Principles
-
-These principles are **authoritative**. Any implementation or extension must preserve them.
-
-### 2.1 Agreement, Not Guessing
-
-Compression is achieved through **shared agreement state** between sender and receiver:
-
-* dictionaries
-* templates
-* epochs
-
-The sender defines meaning.
-The receiver applies meaning.
-
-The receiver **never guesses**.
+Any logic based on `\n`, `\r`, textual structure, or implicit stream semantics is forbidden in the ENZO core.
 
 ---
 
-### 2.2 Magic Is the Only Mandatory Header
+## Mode Detection (LOCKED)
 
-A single **magic byte / marker** is the only unconditional signal required on the wire.
+ENZO determines its operating mode **once per connection**, using explicit on-wire identity:
 
-Magic answers the only always‑necessary question:
+- If the first byte equals the ENZO magic byte → **DECODE mode**
+- Otherwise → **ENCODE mode**
 
-> *“What am I looking at?”*
-
-Once magic is observed and state is established:
-
-* protocol version is known
-* mode is known
-* interpretation rules are known
-
-All other metadata is **conditional** and **state‑dependent**.
+This decision:
+- is content-driven
+- requires no configuration
+- never changes during the lifetime of the connection
 
 ---
 
-### 2.3 Silence Is Meaningful
+## Packet Semantics
 
-The **absence of control output is itself meaningful**.
+### Encoder
 
-* When state does not change, no control information is required
-* Repeating headers when nothing has changed is considered noise
-* Stability is communicated by **silence**, not repetition
+- Reads **exactly one payload chunk** from the upstream producer
+- Applies agreement logic **only within that payload**
+- Emits **exactly one ENZO frame**
 
-Control frames exist **only** to signal state transitions.
+If agreement produces negative ROI:
+- ENZO emits a **RAW_DATA frame**
+- The payload is transmitted unchanged
+- The ENZO header is still present
 
----
-
-### 2.4 Headers Represent Control, Not Payload
-
-Headers are **control traffic**, not data.
-
-They exist only to signal:
-
-* epoch resets
-* dictionary or template definition
-* interpretation changes
-
-Payload data must **not continuously pay a header tax** when state is stable.
+There is a strict 1:1 correspondence between input payloads and output frames.
 
 ---
 
-### 2.5 Opportunistic Compression
+### Decoder
 
-Compression is an **optimization**, never a requirement.
+- Reads **exactly one ENZO frame**
+- Reconstructs the payload deterministically
+- Emits **exactly one payload chunk** downstream
 
-ENZO must:
-
-* observe and learn continuously
-* compress only when profitable
-* transparently pass raw data when compression provides no gain
-
-If compression cannot prove benefit, ENZO must **get out of the way**.
+Decoder output must be **byte-for-byte identical** to encoder input for the same payload.
 
 ---
 
-### 2.6 Raw Passthrough Is a Valid Steady State
+## RAW Semantics (CLARIFIED)
 
-Passing raw data unchanged is:
+**RAW does not mean passthrough.**
 
-* correct behavior
-* a valid long‑term operating mode
-* not a failure condition
+RAW means:
+- ENZO is active
+- a compression attempt was evaluated
+- compression was intentionally skipped
+- the decision is explicitly framed
 
-ENZO must be safe to deploy inline with **zero regret**.
-
----
-
-### 2.7 State Over Repetition
-
-Meaning is carried by **shared state**, not repeated metadata.
-
-Once state is synchronized:
-
-* data alone may be sufficient
-* headers are omitted unless state changes
-
-Epoch reset is the only hard resynchronization mechanism.
+RAW frames:
+- always include the ENZO magic byte
+- never affect agreement state
+- guarantee symmetry and idempotence
 
 ---
 
-## 3. TCP‑In / TCP‑Out Model
+## Adapter Responsibility
 
-ENZO relies entirely on TCP for:
+Boundary decisions belong to adapters, not ENZO.
 
-* ordering
-* reliability
-* backpressure
+Producers (gateways, agents, test harnesses):
+- decide what constitutes a complete dataset
+- assemble full payloads
+- emit payloads atomically
 
-ENZO does **not** re‑implement transport semantics.
-
-It behaves as a pure stream transformer:
-
-```
-TCP → ENZO → TCP
-```
+ENZO:
+- receives payloads
+- transforms them
+- preserves boundaries exactly
 
 ---
 
-## 4. One Connection = One Context
+## Agreement Scope
 
-Each TCP connection owns exactly one:
+Agreement is:
+- **payload-scoped**
+- **stateful across packets**
+- **never inferred**
 
-* dictionary
-* epoch timeline
-* compression context
+If agreement cannot amortize header cost **within a single payload**, ENZO must fall back to RAW.
 
-Contexts are **never shared** across connections.
-
-All state is scoped to the lifetime of the TCP connection.
-
----
-
-## 5. Operational Model
-
-ENZO runs as a single service that:
-
-* listens on one TCP port
-* forwards traffic to one configured destination
-
-Multiple simultaneous connections are supported.
-Each connection is isolated and independent.
-
-Routing decisions are made **per connection**, never globally.
+Negative ROI is allowed but **explicitly framed**.
 
 ---
 
-## 6. Stream Classification (Encode vs Decode)
+## Cost Model (LOCKED)
 
-ENZO auto‑selects behavior by inspecting the incoming stream.
+- The **worst-case loss** for ENZO is the ENZO header size
+- This loss is:
+  - fixed
+  - bounded
+  - paid at most once per payload
 
-### Classification Rule
+There is:
+- no cascading overhead
+- no hop-dependent amplification
+- no hidden expansion
 
-* **Magic byte present** → stream is ENZO‑encoded → **decode mode**
-* **Magic byte absent** → stream is raw → **encode mode**
-
-This decision is:
-
-* deterministic
-* content‑driven
-* configuration‑free
-
-Ports and configuration do not imply meaning.
+This bounded loss is an intentional design trade.
 
 ---
 
-## 7. Epoch Model
+## Consequences of This Architecture
 
-### 7.1 Definition
+- Payload boundaries are preserved end-to-end
+- Compression results are honest and measurable
+- Chaining ENZO instances is always safe
+- Transport quirks cannot sabotage correctness
+- Worst-case behavior is predictable
 
-An **epoch** is a bounded period during which both sides share identical agreement state.
-
-Dictionary IDs and template IDs are valid **only within their epoch**.
-
----
-
-### 7.2 Reset Semantics
-
-If either side:
-
-* loses state
-* restarts
-* detects protocol violation
-
-Then:
-
-* a new epoch begins
-* both sides discard dictionary state
-* compression restarts naturally
-
-The dictionary is treated as a **cache**, not durable state.
-No replay is performed.
+Any regression toward invisible behavior, stream semantics, or implicit decisions violates this architecture.
 
 ---
 
-## 8. Dictionary Model
-
-### 8.1 Nature
-
-The dictionary is:
-
-* bounded
-* disposable
-* per‑connection
-
-Losing the dictionary is acceptable and safe.
-
----
-
-### 8.2 Lifespan
-
-Dictionary entries:
-
-* live within an epoch
-* age only when unused
-* are refreshed on use
-
-When bounds are exceeded, a new epoch is started.
-
----
-
-## 9. Units of Compression
-
-### 9.1 Templates
-
-Templates capture **structural repetition**:
-
-* constant byte segments
-* variable lanes
-
-Templates are defined once and referenced many times.
-
-This works especially well for:
-
-* telemetry
-* line‑oriented protocols
-* logs
-* industrial and control traffic
-
----
-
-### 9.2 RAW Fallback
-
-When data is:
-
-* too small
-* too large
-* insufficiently repetitive
-* unsafe to model
-
-ENZO emits RAW bytes unchanged.
-
-Correctness always wins over compression.
-
----
-
-## 10. Wire Protocol Philosophy
-
-ENZO uses an **event‑based wire protocol**.
-
-Key properties:
-
-* frames represent **control events**, not steady‑state data
-* headers are emitted **only on state transitions**
-* absence of frames implies unchanged state
-
-The protocol is hard‑defined, not negotiated.
-
-See `PROTOCOL.md` for exact wire details.
-
----
-
-## 11. Failure Model
-
-### 11.1 Receiver Restart
-
-If the receiver restarts:
-
-* TCP connection drops
-* state is lost
-* a new epoch begins
-
-Traffic resumes safely on reconnect.
-
----
-
-### 11.2 Invalid Streams
-
-On protocol violation:
-
-* decoding stops
-* epoch is reset or connection is closed
-
-Silent corruption is never allowed.
-
----
-
-## 12. Configuration Philosophy
-
-### 12.1 Separation of Concerns
-
-ENZO separates:
-
-* **protocol invariants** (meaning)
-* **operational policy** (limits and deployment)
-
----
-
-### 12.2 Protocol Invariants (Not Configurable)
-
-The following are fixed by architecture:
-
-* magic semantics
-* encode/decode routing
-* epoch behavior
-* dictionary agreement model
-* strict decoding rules
-
-Any attempt to configure these is ignored or rejected.
-
----
-
-### 12.3 Operational Defaults (Overridable)
-
-Operational limits may be overridden only when explicitly provided:
-
-* connection limits
-* dictionary caps
-* idle timeouts
-* logging verbosity
-
-If omitted, defaults apply unchanged.
-
----
-
-## 13. Minimal Configuration Surface (v1)
-
-```yaml
-listen:
-  address: 0.0.0.0
-  port: 9000
-
-destination:
-  address: 127.0.0.1
-  port: 8086
-```
-
-All other behavior derives from architectural defaults.
-
----
-
-## 14. Security Position
-
-ENZO is **not a security protocol**.
-
-* assumes trusted or externally secured transport
-* may leak structural information
-* does not replace TLS or VPNs
-
----
-
-## 15. Future: Dictionary Encryption
-
-Future versions may support:
-
-* encryption of dictionary definitions only
-* epoch‑scoped keys
-* external key management
-
-Encryption is optional and orthogonal to compression logic.
-
----
-
-## 16. Summary
-
-ENZO works because:
-
-* agreement replaces repetition
-* magic anchors interpretation
-* silence communicates stability
-* dictionaries are disposable
-* epochs make recovery trivial
-* compression is optional and honest
-
-The system favors **correctness, minimal overhead, and operability** over theoretical optimality.
+## Final Summary (DO NOT REMOVE)
+
+> **ENZO exists to transform packets, not streams.**
+>
+> **If ENZO touches the data, it leaves an explicit mark.**
+>
+> **The worst-case loss is the header — and nothing more.**

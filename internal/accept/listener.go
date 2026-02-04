@@ -2,19 +2,20 @@
 package accept
 
 import (
-	stdio "io"
 	"errors"
+	stdio "io"
 	"log"
 	"net"
 
 	"github.com/tamzrod/enzo/internal/connctx"
 	enio "github.com/tamzrod/enzo/internal/io"
+	"github.com/tamzrod/enzo/internal/protocol"
 )
 
 // ListenAndServe accepts incoming TCP connections and classifies them.
 func ListenAndServe(
 	ln net.Listener,
-	ctxFactory func(*enio.BufferedConn, connctx.Mode) *connctx.ConnectionContext,
+	ctxFactory func(*enio.PayloadConn, connctx.Mode) *connctx.ConnectionContext,
 	run func(*connctx.ConnectionContext),
 ) error {
 
@@ -29,14 +30,17 @@ func ListenAndServe(
 
 func handleConn(
 	c net.Conn,
-	ctxFactory func(*enio.BufferedConn, connctx.Mode) *connctx.ConnectionContext,
+	ctxFactory func(*enio.PayloadConn, connctx.Mode) *connctx.ConnectionContext,
 	run func(*connctx.ConnectionContext),
 ) {
 	defer c.Close()
 
-	bc := enio.NewBufferedConn(c)
+	pc := enio.NewPayloadConn(c)
 
-	b, err := bc.PeekByte()
+	// Decide mode from the FIRST byte only.
+	// - If MagicByte: this is ENZO-framed stream => decode
+	// - Else: raw application stream => encode
+	b, err := pc.PeekByte()
 	if err != nil {
 		if errors.Is(err, stdio.EOF) || errors.Is(err, net.ErrClosed) {
 			return // normal empty connection
@@ -45,13 +49,14 @@ func handleConn(
 		return
 	}
 
-	mode := classify(b)
-	cc := ctxFactory(bc, mode)
+	mode := classifyFirstByte(b)
+	cc := ctxFactory(pc, mode)
 	run(cc)
 }
 
-func classify(b byte) connctx.Mode {
-	// ENZO-framed streams start with protocol magic (handled later)
-	// Default to encode for now
+func classifyFirstByte(b byte) connctx.Mode {
+	if b == protocol.MagicByte {
+		return connctx.ModeDecode
+	}
 	return connctx.ModeEncode
 }

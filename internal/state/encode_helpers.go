@@ -35,6 +35,7 @@ func writeFrameCount(
 	case protocol.FrameRawData,
 		protocol.FrameTemplateDefine,
 		protocol.FrameTemplateRef,
+		protocol.FrameTemplateInline,
 		protocol.FrameEpochReset:
 		// allowed
 	default:
@@ -45,10 +46,6 @@ func writeFrameCount(
 	stats.wireOut.Add(uint64(protocol.HeaderSizeBytes + len(payload)))
 
 	// SINGLE write path to the wire.
-	// protocol.WriteFrame is responsible for:
-	// - emitting magic byte
-	// - emitting header
-	// - emitting payload
 	return protocol.WriteFrame(
 		cc.Destination,
 		t,

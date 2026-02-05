@@ -74,22 +74,35 @@ func ParseTemplateDefinePayload(p []byte) (templateID uint16, constA []byte, con
 	i++
 	aLen := int(be.Uint16(p[i : i+2]))
 	i += 2
+	if aLen < 0 || i+aLen > len(p) {
+		return 0, nil, nil, fmt.Errorf("protocol: bad constA length")
+	}
 	constA = append([]byte(nil), p[i:i+aLen]...)
 	i += aLen
 
 	// seg1 VAR
-	if SegmentType(p[i]) != SegVarLane {
+	if i >= len(p) || SegmentType(p[i]) != SegVarLane {
 		return 0, nil, nil, fmt.Errorf("protocol: seg1 not VAR")
 	}
-	i += 3 // type + len(0)
+	i++
+	if i+2 > len(p) {
+		return 0, nil, nil, fmt.Errorf("protocol: bad var segment")
+	}
+	i += 2 // len(0)
 
 	// seg2 CONST
-	if SegmentType(p[i]) != SegConstBytes {
+	if i >= len(p) || SegmentType(p[i]) != SegConstBytes {
 		return 0, nil, nil, fmt.Errorf("protocol: seg2 not CONST")
 	}
 	i++
+	if i+2 > len(p) {
+		return 0, nil, nil, fmt.Errorf("protocol: bad constB length")
+	}
 	bLen := int(be.Uint16(p[i : i+2]))
 	i += 2
+	if bLen < 0 || i+bLen > len(p) {
+		return 0, nil, nil, fmt.Errorf("protocol: bad constB length")
+	}
 	constB = append([]byte(nil), p[i:i+bLen]...)
 
 	return templateID, constA, constB, nil
@@ -136,6 +149,84 @@ func ParseTemplateRefPayload(p []byte) (templateID uint16, lane []byte, err erro
 	lLen := int(be.Uint16(p[i : i+2]))
 	i += 2
 
+	if lLen < 0 || i+lLen > len(p) {
+		return 0, nil, fmt.Errorf("protocol: bad lane length")
+	}
 	lane = append([]byte(nil), p[i:i+lLen]...)
 	return templateID, lane, nil
+}
+
+// BuildTemplateInlinePayload builds TEMPLATE_INLINE for [CONST][VAR][CONST] + lane in ONE frame.
+//
+// Layout:
+//   u16 templateID
+//   u16 constALen
+//   constA bytes
+//   u16 constBLen
+//   constB bytes
+//   u16 laneLen
+//   lane bytes
+func BuildTemplateInlinePayload(templateID uint16, constA []byte, constB []byte, lane []byte) ([]byte, error) {
+	total := 2 + 2 + len(constA) + 2 + len(constB) + 2 + len(lane)
+	if total > MaxFramePayloadBytes {
+		return nil, fmt.Errorf("protocol: inline payload too large: %d", total)
+	}
+
+	out := make([]byte, total)
+	i := 0
+
+	be.PutUint16(out[i:i+2], templateID)
+	i += 2
+
+	be.PutUint16(out[i:i+2], uint16(len(constA)))
+	i += 2
+	copy(out[i:], constA)
+	i += len(constA)
+
+	be.PutUint16(out[i:i+2], uint16(len(constB)))
+	i += 2
+	copy(out[i:], constB)
+	i += len(constB)
+
+	be.PutUint16(out[i:i+2], uint16(len(lane)))
+	i += 2
+	copy(out[i:], lane)
+
+	return out, nil
+}
+
+// ParseTemplateInlinePayload parses TEMPLATE_INLINE payload.
+func ParseTemplateInlinePayload(p []byte) (templateID uint16, constA []byte, constB []byte, lane []byte, err error) {
+	if len(p) < 2+2+2+2 {
+		return 0, nil, nil, nil, fmt.Errorf("protocol: inline payload too short")
+	}
+	i := 0
+
+	templateID = be.Uint16(p[i : i+2])
+	i += 2
+
+	aLen := int(be.Uint16(p[i : i+2]))
+	i += 2
+	if aLen < 0 || i+aLen > len(p) {
+		return 0, nil, nil, nil, fmt.Errorf("protocol: bad inline constA length")
+	}
+	constA = append([]byte(nil), p[i:i+aLen]...)
+	i += aLen
+
+	bLen := int(be.Uint16(p[i : i+2]))
+	i += 2
+	if bLen < 0 || i+bLen > len(p) {
+		return 0, nil, nil, nil, fmt.Errorf("protocol: bad inline constB length")
+	}
+	constB = append([]byte(nil), p[i:i+bLen]...)
+	i += bLen
+
+	lLen := int(be.Uint16(p[i : i+2]))
+	i += 2
+	if lLen < 0 || i+lLen > len(p) {
+		return 0, nil, nil, nil, fmt.Errorf("protocol: bad inline lane length")
+	}
+	lane = append([]byte(nil), p[i:i+lLen]...)
+
+	return templateID, constA, constB, lane, nil
 }

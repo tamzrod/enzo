@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"time"
 
 	"github.com/tamzrod/enzo/internal/connctx"
 )
@@ -17,6 +18,26 @@ func Run(cc *connctx.ConnectionContext) {
 	}
 
 	stats := newConnStats()
+
+	// ---- Periodic stats logger (every 5 seconds) ----
+	statsTicker := time.NewTicker(5 * time.Second)
+	defer statsTicker.Stop()
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-cc.Ctx.Done():
+				return
+			case <-statsTicker.C:
+				if cc.Mode == connctx.ModeEncode {
+					printStats(cc, stats)
+				}
+			}
+		}
+	}()
 
 	// Reverse direction stays RAW passthrough (responses).
 	doneBack := make(chan error, 1)
@@ -36,6 +57,7 @@ func Run(cc *connctx.ConnectionContext) {
 	}
 
 	cc.Cancel()
+	<-done // wait for stats goroutine to stop
 
 	select {
 	case backErr := <-doneBack:
@@ -45,6 +67,7 @@ func Run(cc *connctx.ConnectionContext) {
 	default:
 	}
 
+	// Optional final stats snapshot on exit
 	if cc.Mode == connctx.ModeEncode {
 		printStats(cc, stats)
 	}

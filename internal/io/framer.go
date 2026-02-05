@@ -4,27 +4,16 @@ package io
 import (
 	"bufio"
 	"encoding/binary"
-	"errors"
 	"io"
 	"net"
 	"time"
 )
 
-const (
-	// MaxPayloadSize is a hard safety limit to prevent OOM.
-	// This is an operational limit, not a protocol semantic.
-	MaxPayloadSize = 16 * 1024 * 1024 // 16 MiB
-)
+// NOTE:
+// Payload size limits are intentionally DISABLED.
+// Payload size must NEVER block delivery.
+// Size may influence compression choice elsewhere, never IO.
 
-// PayloadConn is a minimal wrapper over net.Conn that supports:
-//
-// - PeekByte() for stream classification (magic detection)
-// - ReadPacket()/WritePacket() for explicit payload framing
-//
-// It does NOT:
-// - split by delimiters
-// - parse text
-// - infer message boundaries
 type PayloadConn struct {
 	conn net.Conn
 	r    *bufio.Reader
@@ -62,9 +51,6 @@ func (p *PayloadConn) ReadPacket() ([]byte, error) {
 	if n == 0 {
 		return []byte{}, nil
 	}
-	if n > MaxPayloadSize {
-		return nil, errors.New("payloadconn: payload exceeds MaxPayloadSize")
-	}
 
 	payload := make([]byte, int(n))
 	if _, err := io.ReadFull(p.r, payload); err != nil {
@@ -76,10 +62,6 @@ func (p *PayloadConn) ReadPacket() ([]byte, error) {
 // WritePacket writes exactly one payload packet to the stream,
 // using an explicit uint32 BE length prefix.
 func (p *PayloadConn) WritePacket(payload []byte) error {
-	if len(payload) > MaxPayloadSize {
-		return errors.New("payloadconn: payload exceeds MaxPayloadSize")
-	}
-
 	var lenBuf [4]byte
 	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(payload)))
 

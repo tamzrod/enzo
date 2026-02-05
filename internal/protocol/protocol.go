@@ -24,6 +24,10 @@ const (
 	FrameTemplateDefine FrameType = 0x02
 	FrameTemplateRef    FrameType = 0x03
 	FrameRawData        FrameType = 0x04
+
+	// FrameTemplateInline carries both template definition and lane in ONE frame.
+	// This exists to preserve the locked invariant: 1 payload -> 1 frame.
+	FrameTemplateInline FrameType = 0x05
 )
 
 // Header layout (fixed, v1)
@@ -69,6 +73,15 @@ const (
 //   repeating lanes:
 //     u16 laneLen
 //     laneBytes
+//
+// TEMPLATE_INLINE payload (v1):
+//   u16 templateID
+//   u16 constALen
+//   constA bytes
+//   u16 constBLen
+//   constB bytes
+//   u16 laneLen
+//   lane bytes
 type SegmentType uint8
 
 const (

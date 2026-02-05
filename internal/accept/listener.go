@@ -38,12 +38,12 @@ func handleConn(
 	pc := enio.NewPayloadConn(c)
 
 	// Decide mode from the FIRST byte only.
-	// - If MagicByte: this is ENZO-framed stream => decode
+	// - If MagicByte: ENZO-framed stream => decode
 	// - Else: raw application stream => encode
 	b, err := pc.PeekByte()
 	if err != nil {
 		if errors.Is(err, stdio.EOF) || errors.Is(err, net.ErrClosed) {
-			return // normal empty connection
+			return
 		}
 		log.Printf("stream classify failed: %v", err)
 		return

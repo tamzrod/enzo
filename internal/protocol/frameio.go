@@ -158,19 +158,19 @@ func validatePayloadShapeV1(t FrameType, payload []byte) error {
 		return nil
 
 	case FrameTemplateDefine:
-		// TEMPLATE_DEFINE structure is validated by the template parser.
-		// Here we only accept that payload may be empty at the frame layer (parser will reject).
+		// Validated by the template parser.
 		return nil
 
 	case FrameTemplateRef:
-		// TEMPLATE_REF structure is validated by the ref parser.
-		// Here we only accept that payload may be empty at the frame layer (parser will reject).
+		// Validated by the ref parser.
+		return nil
+
+	case FrameTemplateInline:
+		// Validated by the inline parser.
 		return nil
 
 	default:
-		// Policy choice:
-		// - v1 strict mode: unknown frame type is rejected here.
-		// If you want forward-compatible skipping, this must be changed consistently with state machine behavior.
+		// v1 strict mode: unknown frame type rejected.
 		return fmt.Errorf("protocol: unknown frame type: 0x%02X", byte(t))
 	}
 }

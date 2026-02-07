@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	enio "github.com/tamzrod/enzo/internal/io"
+	"github.com/tamzrod/enzo/internal/memory"
 )
 
 // Mode defines how this connection is processed.
@@ -33,6 +34,17 @@ type ConnectionContext struct {
 
 	// Dictionary / agreement state (opaque for now)
 	Dictionary any
+
+	// ---- Observer-only memory (LOCKED v1) ----
+	// RawWindowFwd observes the forward-direction "truth stream":
+	// - In ENCODE: normalized HTTP header + dechunked body (what backend will see).
+	// - In DECODE: reconstructed HTTP request bytes flushed to Destination.
+	// It must NEVER influence wire flow.
+	RawWindowFwd *memory.RawWindow
+
+	// RawWindowRev observes reverse-direction raw bytes (responses).
+	// It must NEVER influence wire flow.
+	RawWindowRev *memory.RawWindow
 
 	// Lifecycle control
 	Ctx    context.Context

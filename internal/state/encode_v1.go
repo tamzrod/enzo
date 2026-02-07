@@ -76,6 +76,19 @@ func runEncodeTemplateV1(cc *connctx.ConnectionContext, stats *connStats) error 
 		// - Force truthful Content-Length for the dechunked body
 		hdr := normalizeHTTPHeaders(meta.HeaderBytes, len(body))
 
+		// ---- PURE OBSERVER (Option B): observe reconstructed truth stream ----
+		// This is the exact byte stream the backend will see after decode/expansion:
+		// [normalized header bytes] + [dechunked body bytes]
+		// It must NEVER influence wire flow.
+		if cc.RawWindowFwd != nil {
+			if len(hdr) > 0 {
+				cc.RawWindowFwd.Append(hdr)
+			}
+			if len(body) > 0 {
+				cc.RawWindowFwd.Append(body)
+			}
+		}
+
 		// ---- HEADER COMPRESSION (DEFINE/REF) ----
 		if err := encodeHeaderLines(cc, d, spanStats, stats, hdr); err != nil {
 			return err

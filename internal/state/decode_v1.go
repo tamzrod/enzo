@@ -66,6 +66,13 @@ func runDecodeTemplateV1(cc *connctx.ConnectionContext) error {
 			if err != nil {
 				return err
 			}
+
+			// ---- PURE OBSERVER (Option B) ----
+			// Observe only bytes that were successfully written.
+			if cc.RawWindowFwd != nil && n > 0 {
+				cc.RawWindowFwd.Append(out[:n])
+			}
+
 			out = out[n:]
 		}
 

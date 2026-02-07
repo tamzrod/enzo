@@ -50,7 +50,14 @@ func handleConn(
 	}
 
 	mode := classifyFirstByte(b)
+
 	cc := ctxFactory(pc, mode)
+	if cc == nil {
+		// Destination unavailable or context creation failed.
+		// Per-connection failure only; listener must continue.
+		return
+	}
+
 	run(cc)
 }
 

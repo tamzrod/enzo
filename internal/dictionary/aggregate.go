@@ -1,6 +1,16 @@
 // internal/dictionary/aggregate.go
 package dictionary
 
+const (
+	// DictionaryMaxBytes defines the maximum allowed
+	// in-memory size for learned candidates (approximate).
+	DictionaryMaxBytes uint32 = 1 << 20 // 1 MB
+
+	// CandidateOverheadBytes is a conservative fixed cost
+	// per candidate entry (map + struct + bookkeeping).
+	CandidateOverheadBytes uint32 = 32
+)
+
 // Aggregator observes RAW spans and accumulates candidate statistics.
 // External shape is CONTRACT-LOCKED.
 type Aggregator struct {
@@ -53,6 +63,27 @@ func (a *Aggregator) ObservePacket(
 			seenThisPacket[key] = true
 		}
 	}
+
+	// Pressure-based eviction (ONE entry max)
+	a.maybeEvict(packetID)
+}
+
+// maybeEvict performs a single eviction when the
+// approximate dictionary size exceeds the budget.
+func (a *Aggregator) maybeEvict(currentEpoch uint64) {
+	var total uint32
+
+	for _, s := range a.Stats {
+		total += s.Size + CandidateOverheadBytes
+	}
+
+	if total <= DictionaryMaxBytes {
+		return
+	}
+
+	// Evict exactly one lowest-worth candidate
+	// from the evictable half.
+	EvictOne(a.Stats, currentEpoch)
 }
 
 // makePatternKey hashes CONST_A and CONST_B into a stable signature.

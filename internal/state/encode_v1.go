@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/tamzrod/enzo/internal/connctx"
+	"github.com/tamzrod/enzo/internal/dictionary"
 	"github.com/tamzrod/enzo/internal/httpio"
 	"github.com/tamzrod/enzo/internal/protocol"
 )
@@ -46,6 +47,14 @@ func runEncodeTemplateV1(cc *connctx.ConnectionContext, stats *connStats) error 
 		cc.Dictionary = d
 	}
 
+	// NEW: per-connection dictionary learner (observe-only for now)
+	// 1MB cap locked; wiring to emit is NOT in scope yet.
+	learner := dictionary.NewAggregator(1 * 1024 * 1024)
+	learner.WindowStart = 0
+	learner.WindowEnd = ^uint64(0)
+
+	var packetID uint64 = 0
+
 	// Per-connection encoder-only stats for promotion gating
 	spanStats := make(map[uint16]*spanStat)
 
@@ -70,6 +79,8 @@ func runEncodeTemplateV1(cc *connctx.ConnectionContext, stats *connStats) error 
 			}
 			return err
 		}
+
+		packetID++
 
 		// Normalize headers:
 		// - Remove Transfer-Encoding: chunked
@@ -97,8 +108,17 @@ func runEncodeTemplateV1(cc *connctx.ConnectionContext, stats *connStats) error 
 		// ---- BODY COMPRESSION (Influx LP: key=value span factoring) ----
 		if len(body) > 0 {
 			stats.rawIn.Add(uint64(len(body)))
-			if err := encodeBodyAsLines(cc, d, spanStats, stats, body); err != nil {
+
+			// NEW: Observe candidates while encoding (no wire effect).
+			obs := make([]dictionary.SpanObservation, 0, 64)
+
+			if err := encodeBodyAsLines(cc, d, spanStats, stats, body, &obs); err != nil {
 				return err
+			}
+
+			// Feed learner once per packet to preserve "packet-local" counting.
+			if len(obs) > 0 {
+				learner.ObservePacket(packetID, obs)
 			}
 		}
 	}
@@ -209,6 +229,7 @@ func encodeBodyAsLines(
 	spanStats map[uint16]*spanStat,
 	stats *connStats,
 	body []byte,
+	obs *[]dictionary.SpanObservation, // NEW: optional observe-only collector
 ) error {
 
 	i := 0
@@ -224,7 +245,7 @@ func encodeBodyAsLines(
 
 		stats.rawIn.Add(uint64(len(line)))
 
-		if err := encodeInfluxLineKV(cc, d, spanStats, stats, line); err != nil {
+		if err := encodeInfluxLineKV(cc, d, spanStats, stats, line, obs); err != nil {
 			return err
 		}
 	}
@@ -237,6 +258,7 @@ func encodeInfluxLineKV(
 	spanStats map[uint16]*spanStat,
 	stats *connStats,
 	line []byte,
+	obs *[]dictionary.SpanObservation, // NEW: optional observe-only collector
 ) error {
 
 	if len(line) < 2 || line[len(line)-1] != '\n' {
@@ -287,6 +309,17 @@ func encodeInfluxLineKV(
 
 		lane := append([]byte(nil), line[valStart:delimIdx]...)
 		constB := []byte{delimByte}
+
+		// NEW: observe-only span candidate (packet-local counting happens in aggregator)
+		if obs != nil {
+			*obs = append(*obs, dictionary.SpanObservation{
+				ConstA:         append([]byte(nil), constA...),
+				ConstB:         append([]byte(nil), constB...),
+				IntraHits:      1,
+				SpanSize:       uint32(len(constA) + len(lane) + len(constB)),
+				LastSeenOffset: 0, // offset wiring later when RawWindow exposes it
+			})
+		}
 
 		if err := emitWithDelayedPromotionDefineRef(cc, d, spanStats, stats, constA, lane, constB); err != nil {
 			return err

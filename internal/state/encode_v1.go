@@ -32,6 +32,8 @@ LOCKED RULES (v1):
 
 const promoteAfterHits = 3
 
+
+
 type spanStat struct {
 	Hits    uint32
 	Defined bool
@@ -47,16 +49,20 @@ func runEncodeTemplateV1(cc *connctx.ConnectionContext, stats *connStats) error 
 		cc.Dictionary = d
 	}
 
+	// Per-connection encoder-only stats for promotion gating
+	spanStats := make(map[uint16]*spanStat)
+
 	// NEW: per-connection dictionary learner (observe-only for now)
-	// 1MB cap locked; wiring to emit is NOT in scope yet.
-	learner := dictionary.NewAggregator(1 * 1024 * 1024)
+	learner := dictionary.NewAggregator(1 * 1024 * 1024) // 1MB cap locked
 	learner.WindowStart = 0
-	learner.WindowEnd = ^uint64(0)
+	learner.WindowEnd = 0
 
 	var packetID uint64 = 0
 
-	// Per-connection encoder-only stats for promotion gating
-	spanStats := make(map[uint16]*spanStat)
+	// Forward "truth stream" absolute offset:
+	// counts exact bytes that backend would see after decode/expansion:
+	// [normalized header bytes] + [dechunked body bytes]
+	var truthOffset uint64 = 0
 
 	// Read HTTP from raw TCP (chunked supported by httpio)
 	r := bufio.NewReader(cc.Source)
@@ -87,6 +93,19 @@ func runEncodeTemplateV1(cc *connctx.ConnectionContext, stats *connStats) error 
 		// - Force truthful Content-Length for the dechunked body
 		hdr := normalizeHTTPHeaders(meta.HeaderBytes, len(body))
 
+		// Compute offsets for this request in the truth stream
+		pktStart := truthOffset
+		bodyBase := pktStart + uint64(len(hdr))
+		pktEnd := pktStart + uint64(len(hdr)+len(body)) // end after observing hdr+body
+
+		// Update learner window bounds to match the rolling 2MB truth window
+		learner.WindowEnd = pktEnd
+		if pktEnd > rawWindowSizeBytes {
+			learner.WindowStart = pktEnd - rawWindowSizeBytes
+		} else {
+			learner.WindowStart = 0
+		}
+
 		// ---- PURE OBSERVER (Option B): observe reconstructed truth stream ----
 		// This is the exact byte stream the backend will see after decode/expansion:
 		// [normalized header bytes] + [dechunked body bytes]
@@ -109,18 +128,21 @@ func runEncodeTemplateV1(cc *connctx.ConnectionContext, stats *connStats) error 
 		if len(body) > 0 {
 			stats.rawIn.Add(uint64(len(body)))
 
-			// NEW: Observe candidates while encoding (no wire effect).
-			obs := make([]dictionary.SpanObservation, 0, 64)
+			// Observe spans while encoding (no wire effect).
+			obs := make([]dictionary.SpanObservation, 0, 128)
 
-			if err := encodeBodyAsLines(cc, d, spanStats, stats, body, &obs); err != nil {
+			if err := encodeBodyAsLines(cc, d, spanStats, stats, body, bodyBase, &obs); err != nil {
 				return err
 			}
 
-			// Feed learner once per packet to preserve "packet-local" counting.
+			// Feed learner once per packet to preserve packet-local counting.
 			if len(obs) > 0 {
 				learner.ObservePacket(packetID, obs)
 			}
 		}
+
+		// Advance truth stream offset AFTER processing this request
+		truthOffset = pktEnd
 	}
 }
 
@@ -229,6 +251,7 @@ func encodeBodyAsLines(
 	spanStats map[uint16]*spanStat,
 	stats *connStats,
 	body []byte,
+	bodyBaseOffset uint64,                 // NEW: absolute truth offset where body begins
 	obs *[]dictionary.SpanObservation, // NEW: optional observe-only collector
 ) error {
 
@@ -239,13 +262,15 @@ func encodeBodyAsLines(
 			return writeFrameCount(cc, protocol.FrameRawData, body[i:], stats)
 		}
 
+		lineStart := i
 		j = i + j + 1
 		line := body[i:j]
 		i = j
 
 		stats.rawIn.Add(uint64(len(line)))
 
-		if err := encodeInfluxLineKV(cc, d, spanStats, stats, line, obs); err != nil {
+		lineStartOffset := bodyBaseOffset + uint64(lineStart)
+		if err := encodeInfluxLineKV(cc, d, spanStats, stats, line, lineStartOffset, obs); err != nil {
 			return err
 		}
 	}
@@ -258,6 +283,7 @@ func encodeInfluxLineKV(
 	spanStats map[uint16]*spanStat,
 	stats *connStats,
 	line []byte,
+	lineStartOffset uint64,                 // NEW: absolute truth offset where this line begins
 	obs *[]dictionary.SpanObservation, // NEW: optional observe-only collector
 ) error {
 
@@ -310,14 +336,16 @@ func encodeInfluxLineKV(
 		lane := append([]byte(nil), line[valStart:delimIdx]...)
 		constB := []byte{delimByte}
 
-		// NEW: observe-only span candidate (packet-local counting happens in aggregator)
+		// NEW: observe-only span candidate with REAL absolute LastSeenOffset
 		if obs != nil {
+			// lastSeen is position right AFTER the delimiter byte
+			lastSeen := lineStartOffset + uint64(delimIdx+1)
 			*obs = append(*obs, dictionary.SpanObservation{
 				ConstA:         append([]byte(nil), constA...),
 				ConstB:         append([]byte(nil), constB...),
 				IntraHits:      1,
 				SpanSize:       uint32(len(constA) + len(lane) + len(constB)),
-				LastSeenOffset: 0, // offset wiring later when RawWindow exposes it
+				LastSeenOffset: lastSeen,
 			})
 		}
 

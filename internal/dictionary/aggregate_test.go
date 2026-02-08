@@ -1,3 +1,4 @@
+// internal/dictionary/aggregate_test.go
 package dictionary
 
 import "testing"

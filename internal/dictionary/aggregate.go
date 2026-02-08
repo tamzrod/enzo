@@ -9,7 +9,8 @@ const (
 )
 
 // Aggregator owns candidate accumulation and qualification.
-// It does NOT evict entries (handled later).
+// It does NOT implement eviction itself; it delegates insertion decisions
+// to Dictionary.TryInsert (which may evict or reject).
 type Aggregator struct {
 	Index      *CandidateIndex
 	Dictionary *Dictionary
@@ -26,7 +27,7 @@ func NewAggregator(dictBytes uint32) *Aggregator {
 			ByKey: make(map[PatternKey]*Candidate),
 		},
 		Dictionary: &Dictionary{
-			MaxBytes: dictBytes,
+			MaxBytes:  dictBytes,
 			UsedBytes: 0,
 			Entries:   make(map[uint32]*DictionaryEntry),
 			NextID:    1,
@@ -37,6 +38,8 @@ func NewAggregator(dictBytes uint32) *Aggregator {
 // ObservePacket ingests span observations from ONE packet.
 // packetID is used to count inter-packet hits once per packet.
 func (a *Aggregator) ObservePacket(packetID uint64, obs []SpanObservation) {
+	_ = packetID // reserved for future de-dupe strategies; current de-dupe is key-local
+
 	seenThisPacket := make(map[PatternKey]bool)
 
 	for _, o := range obs {
@@ -45,9 +48,9 @@ func (a *Aggregator) ObservePacket(packetID uint64, obs []SpanObservation) {
 		c, ok := a.Index.ByKey[key]
 		if !ok {
 			c = &Candidate{
-				ID:             0,
-				ConstA:         append([]byte(nil), o.ConstA...),
-				ConstB:         append([]byte(nil), o.ConstB...),
+				ID:              0,
+				ConstA:          append([]byte(nil), o.ConstA...),
+				ConstB:          append([]byte(nil), o.ConstB...),
 				IntraPacketHits: 0,
 				InterPacketHits: 0,
 				LastSeenOffset:  o.LastSeenOffset,
@@ -60,22 +63,22 @@ func (a *Aggregator) ObservePacket(packetID uint64, obs []SpanObservation) {
 		// Update intra-packet hits (accumulate)
 		c.IntraPacketHits += o.IntraHits
 
-		// Update inter-packet hits once per packet
+		// Update inter-packet hits once per packet (per candidate)
 		if !seenThisPacket[key] {
 			c.InterPacketHits++
 			seenThisPacket[key] = true
 		}
 
-		// Update last seen
+		// Update last seen (monotonic)
 		if o.LastSeenOffset > c.LastSeenOffset {
 			c.LastSeenOffset = o.LastSeenOffset
 		}
 
-		// Update score (simple, fast)
+		// Update score (simple + fast)
 		totalHits := uint64(c.IntraPacketHits) + uint64(c.InterPacketHits)
 		c.Score = totalHits * uint64(c.SpanSize)
 
-		// Try qualification
+		// Try qualification (may promote)
 		a.tryQualify(c)
 	}
 }
@@ -104,13 +107,11 @@ func (a *Aggregator) tryQualify(c *Candidate) {
 	}
 }
 
-// promote assigns ID and inserts into dictionary.
-// Memory pressure handling is deferred (no eviction yet).
+// promote attempts to insert a promoted entry into the bounded dictionary.
+// The dictionary decides if it fits (evict / reject). Aggregator never evicts.
 func (a *Aggregator) promote(c *Candidate) {
+	// Allocate an ID ONLY if insertion succeeds (no gaps, no recycle).
 	id := a.Dictionary.NextID
-	a.Dictionary.NextID++
-
-	c.ID = id
 
 	entry := &DictionaryEntry{
 		ID:             id,
@@ -122,8 +123,14 @@ func (a *Aggregator) promote(c *Candidate) {
 		LastSeenOffset: c.LastSeenOffset,
 	}
 
-	a.Dictionary.Entries[id] = entry
-	// NOTE: UsedBytes update deferred until eviction is implemented
+	if !a.Dictionary.TryInsert(entry) {
+		// Reject promotion silently; RAW continues.
+		return
+	}
+
+	// Commit ID only on success
+	a.Dictionary.NextID++
+	c.ID = id
 }
 
 // makePatternKey hashes CONST_A and CONST_B into a stable key.

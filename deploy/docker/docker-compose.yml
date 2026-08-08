@@ -1,0 +1,11 @@
+services:
+  # ENZO Web UI - runs web interface and spawns ENZO processes
+  webui:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: enzo-webui
+    environment:
+      - PORT=8282
+    restart: unless-stopped
+    network_mode: host
